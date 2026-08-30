@@ -86,9 +86,16 @@ Click-to-highlight viewer.
   `public/pdfjs/pdf.worker.min.mjs` (same-origin, no CDN dependency/version-
   matching risk).
 - **pdf-to-img / pdfjs-dist / @napi-rs/canvas** for server-side PDF → image
-  rendering (pure npm install, no Poppler/ImageMagick system dependency, so it
-  deploys cleanly to Vercel's serverless functions) — kept as a fallback path
-  for direct API use, though the UI never sends raw PDFs anymore.
+  rendering — kept as a fallback path for direct API use (the UI never sends
+  raw PDFs anymore), imported lazily rather than at module load. That fallback
+  doesn't actually work on Vercel: `pdf-to-img`'s dependency chain references
+  `DOMMatrix`, a browser API absent from Vercel's Node.js Serverless Function
+  runtime, so it throws immediately (it works fine locally, where Node happens
+  to expose it) — a limitation of that npm package on this platform, not
+  something fixable from application code. Importing it lazily, only inside
+  the PDF branch, at least contains the failure to direct-API PDF uploads
+  instead of letting it take down the whole route on every request the way a
+  top-level import did.
 - No database, no auth — in-memory only, as allowed by the assignment.
 
 ## Running locally
@@ -139,3 +146,8 @@ synthetic photo and a 6-page PDF.
   compress as well, could still exceed Vercel's ~4.5MB request body limit. The
   app checks the total size before uploading and shows a clear error rather
   than the raw platform rejection if that happens.
+- **The server-side PDF fallback path doesn't work on Vercel** (see Tech
+  stack — a `DOMMatrix`/`pdf-to-img` platform incompatibility). This doesn't
+  affect normal use through the app's UI, which always converts every page to
+  a JPEG in the browser before upload; it only matters for a raw PDF sent
+  directly to `/api/process`, bypassing the UI entirely.
