@@ -1,13 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { filesToJpegBlobs, totalBlobBytes } from "@/lib/clientConvert";
 
 const STEPS = [
+  { key: "preparing", label: "Preparing files in your browser" },
   { key: "converting", label: "Converting uploaded files to page images" },
   { key: "questions", label: "Extracting questions from the question paper" },
   { key: "answers", label: "Reading handwriting on the answer sheet" },
   { key: "mapping", label: "Mapping answers to questions" },
 ];
+
+// Vercel rejects request bodies over ~4.5MB with a non-JSON error before our
+// code ever runs. Pages are compressed client-side first (see
+// lib/clientConvert.js) to stay well under that, but a very long document
+// can still add up — catch it here with a clear message instead of letting
+// the raw platform error reach the user.
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
 
 export default function Home() {
   const [stage, setStage] = useState("upload"); // upload | progress | viewer
@@ -30,20 +39,58 @@ export default function Home() {
 
     setError(null);
     setCompletedSteps([]);
-    setActiveStep(STEPS[0].key);
+    setActiveStep("preparing");
     setStage("progress");
 
-    const formData = new FormData();
-    questionFiles.forEach((f) => formData.append("questionPaper", f));
-    answerFiles.forEach((f) => formData.append("answerSheet", f));
-
     try {
+      const [questionBlobs, answerBlobs] = await Promise.all([
+        filesToJpegBlobs(questionFiles),
+        filesToJpegBlobs(answerFiles),
+      ]);
+
+      const totalBytes = totalBlobBytes([questionBlobs, answerBlobs]);
+      if (totalBytes > MAX_UPLOAD_BYTES) {
+        throw new Error(
+          `These files are too large even after compression (${(
+            totalBytes /
+            1024 /
+            1024
+          ).toFixed(1)}MB). Try fewer pages per upload, or lower-resolution scans/photos.`
+        );
+      }
+
+      setCompletedSteps(["preparing"]);
+      setActiveStep(STEPS[1].key);
+
+      const formData = new FormData();
+      questionBlobs.forEach((blob, i) =>
+        formData.append("questionPaper", blob, `question-${i}.jpg`)
+      );
+      answerBlobs.forEach((blob, i) =>
+        formData.append("answerSheet", blob, `answer-${i}.jpg`)
+      );
+
       const res = await fetch("/api/process", { method: "POST", body: formData });
       if (!res.body) throw new Error("No response body from server.");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+
+      const parseLine = (line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          // The server always streams ndjson; anything else means a proxy/
+          // platform in front of it rejected the request outright (e.g. a
+          // plain-text "Request Entity Too Large") before our code ran.
+          throw new Error(
+            res.ok
+              ? "The server sent back something unexpected. Please try again."
+              : `Upload rejected (HTTP ${res.status}): ${line.slice(0, 200)}`
+          );
+        }
+      };
 
       while (true) {
         const { value, done } = await reader.read();
@@ -54,11 +101,10 @@ export default function Home() {
 
         for (const line of lines) {
           if (!line.trim()) continue;
-          const event = JSON.parse(line);
-          handleEvent(event);
+          handleEvent(parseLine(line));
         }
       }
-      if (buffer.trim()) handleEvent(JSON.parse(buffer));
+      if (buffer.trim()) handleEvent(parseLine(buffer));
     } catch (err) {
       console.error(err);
       setError(err.message || "Something went wrong while processing.");

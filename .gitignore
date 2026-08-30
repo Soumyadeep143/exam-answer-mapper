@@ -5,3 +5,8 @@ out
 .env.local
 .DS_Store
 npm-debug.log*
+
+# Large synthetic fixtures for test/compression-e2e.mjs — regenerate with
+# test/generate_fixtures.py rather than committing multi-MB binaries.
+test/big-photo.jpg
+test/big-multipage.pdf

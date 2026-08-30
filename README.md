@@ -15,11 +15,24 @@ Click-to-highlight viewer.
    images, multiple files/pages supported). Nothing is written to a database —
    everything lives only for the lifetime of the request (in-memory), per the
    assignment's constraints.
-2. **Convert to page images.** PDFs are rasterized server-side to JPEG page images
-   (`pdf-to-img`, backed by `pdfjs-dist` + `@napi-rs/canvas`, so no native/system
-   dependency is required — it installs cleanly on Vercel). Plain image uploads are
-   used as-is. These are the *same* images shown in the UI and sent to the model, so
-   any bounding box the model returns lines up with what the teacher sees.
+2. **Convert to page images — in the browser, before upload.** Every uploaded page
+   (PDF or image) is rasterized/downscaled to a capped-resolution, recompressed
+   JPEG client-side (`lib/clientConvert.js`, using `pdfjs-dist` + canvas) before
+   the request is sent. This is a deliberate fix, not just an optimization:
+   Vercel's Serverless Functions reject request bodies over ~4.5MB with a
+   plain-text "Request Entity Too Large" response (not JSON, and not
+   configurable away for App Router route handlers), which broke uploads for
+   any realistically-sized scan — a couple of phone-camera photos or a
+   multi-page scanned PDF routinely exceed that on their own. Compressing
+   client-side (a 4000×3000 test photo → ~1700px long side, JPEG quality 0.8)
+   gets a typical page down to a few hundred KB, so a normal multi-page exam
+   comfortably clears the limit; the app also checks the total compressed size
+   before uploading and shows a clear error instead of a cryptic platform
+   rejection if it's still too big. The server-side PDF rasterization path
+   (`pdf-to-img` + `@napi-rs/canvas`, no native/system dependency) is kept as a
+   fallback for direct API use. These compressed images are the *same* ones
+   shown in the UI and sent to the model, so any bounding box the model
+   returns lines up with what the teacher sees.
 3. **Extract questions.** All question-paper page images are sent to a vision model
    in one call with a strict JSON schema (OpenAI Structured Outputs, or an
    equivalent prompted-JSON contract for the fallback providers — see below). The
@@ -63,9 +76,19 @@ Click-to-highlight viewer.
   configurable via `OPENAI_MODEL` / `GEMINI_MODEL` / `GROQ_MODEL`. The UI's
   processing-progress stream surfaces it when a fallback kicked in (e.g. "OpenAI
   unavailable — used Gemini instead").
-- **pdf-to-img / pdfjs-dist / @napi-rs/canvas** for PDF → image rendering
-  (pure npm install, no Poppler/ImageMagick system dependency, so it deploys
-  cleanly to Vercel's serverless functions).
+- **pdfjs-dist (client-side)** renders/downscales every page to a compressed
+  JPEG in the browser before upload — see the fallback rationale above. Pinned
+  to the 4.x line rather than the latest major: pdf.js 6.x turned out to rely
+  on `Map.prototype.getOrInsertComputed`, a JS engine method that only reached
+  Baseline in February 2026, which would silently break the upload for anyone
+  not on the very latest browser. 4.10.38 works everywhere evergreen browsers
+  are supported. The matching worker file is committed at
+  `public/pdfjs/pdf.worker.min.mjs` (same-origin, no CDN dependency/version-
+  matching risk).
+- **pdf-to-img / pdfjs-dist / @napi-rs/canvas** for server-side PDF → image
+  rendering (pure npm install, no Poppler/ImageMagick system dependency, so it
+  deploys cleanly to Vercel's serverless functions) — kept as a fallback path
+  for direct API use, though the UI never sends raw PDFs anymore.
 - No database, no auth — in-memory only, as allowed by the assignment.
 
 ## Running locally
@@ -80,7 +103,9 @@ Open http://localhost:3000.
 
 `node test/fallback-test.mjs` exercises the fallback control flow in isolation
 (provider order, key-skipping, error aggregation) without needing real API
-access.
+access. `node test/compression-e2e.mjs` (after `python3 test/generate_fixtures.py`)
+verifies the client-side compression path in a real browser against a large
+synthetic photo and a 6-page PDF.
 
 ## Assumptions & limitations
 
@@ -108,3 +133,9 @@ access.
   writing. If it's ever reached as a fallback with a longer document, that call
   will fail and error out (rather than silently truncating pages) — OpenAI and
   Gemini don't have this limitation.
+- **Very long documents can still hit the request-size ceiling.** Client-side
+  compression (see Tech stack) comfortably covers a normal multi-page exam, but
+  an extremely long one, or unusually dense/high-contrast scans that don't
+  compress as well, could still exceed Vercel's ~4.5MB request body limit. The
+  app checks the total size before uploading and shows a clear error rather
+  than the raw platform rejection if that happens.
