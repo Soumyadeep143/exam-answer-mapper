@@ -46,7 +46,19 @@ export async function POST(request) {
           type: "status",
           message: `Extracting questions from ${questionPages.length} page(s)...`,
         });
-        const questions = await extractQuestions(questionPages);
+        const questions = await extractQuestions(questionPages, {
+          onProvider: (name, failedBefore) => {
+            if (failedBefore.length) {
+              send({
+                step: "questions",
+                type: "status",
+                message: `${failedBefore
+                  .map((f) => f.split(":")[0])
+                  .join(", ")} unavailable — used ${name} instead.`,
+              });
+            }
+          },
+        });
 
         send({
           step: "answers",
@@ -54,7 +66,19 @@ export async function POST(request) {
           message: `Reading handwriting on ${answerPages.length} page(s)...`,
         });
         const knownNumbers = questions.map((q) => q.number);
-        const answers = await extractAnswers(answerPages, knownNumbers);
+        const answers = await extractAnswers(answerPages, knownNumbers, {
+          onProvider: (name, failedBefore) => {
+            if (failedBefore.length) {
+              send({
+                step: "answers",
+                type: "status",
+                message: `${failedBefore
+                  .map((f) => f.split(":")[0])
+                  .join(", ")} unavailable — used ${name} instead.`,
+              });
+            }
+          },
+        });
 
         send({
           step: "mapping",

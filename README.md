@@ -20,15 +20,17 @@ Click-to-highlight viewer.
    dependency is required — it installs cleanly on Vercel). Plain image uploads are
    used as-is. These are the *same* images shown in the UI and sent to the model, so
    any bounding box the model returns lines up with what the teacher sees.
-3. **Extract questions.** All question-paper page images are sent to GPT-4o in one
-   call with a strict JSON schema (OpenAI Structured Outputs). The model is
-   instructed to preserve the exact printed numbering and to treat labelled
-   sub-parts (e.g. `11(a)` / `11(b)`) as separate questions, in printed order.
-4. **Extract answers.** All answer-sheet page images are sent to GPT-4o in a second
-   call, along with the list of known question numbers from step 3. For every
-   handwritten answer region the model transcribes the text, gives a normalized
-   bounding box (fraction of the page image, top-left origin), and its best guess
-   at which question number it belongs to (or `null` if it can't tell).
+3. **Extract questions.** All question-paper page images are sent to a vision model
+   in one call with a strict JSON schema (OpenAI Structured Outputs, or an
+   equivalent prompted-JSON contract for the fallback providers — see below). The
+   model is instructed to preserve the exact printed numbering and to treat
+   labelled sub-parts (e.g. `11(a)` / `11(b)`) as separate questions, in printed
+   order.
+4. **Extract answers.** All answer-sheet page images are sent to a vision model in
+   a second call, along with the list of known question numbers from step 3. For
+   every handwritten answer region the model transcribes the text, gives a
+   normalized bounding box (fraction of the page image, top-left origin), and its
+   best guess at which question number it belongs to (or `null` if it can't tell).
 5. **Map.** Server-side code (`lib/match.js`) normalizes both sides' question
    numbers (case/whitespace/`Q`-prefix/punctuation insensitive) and joins them.
    Every question ends up `answered` (with one highlight region per page it
@@ -48,8 +50,19 @@ Click-to-highlight viewer.
 - **Next.js 14** (App Router, JavaScript) — chosen per the assignment's
   recommendation. Single Node.js route handler (`app/api/process/route.js`) does
   all processing; no separate backend service.
-- **OpenAI GPT-4o** (vision + Structured Outputs) for both extraction steps —
-  configurable via `OPENAI_MODEL` (e.g. swap to `gpt-4o-mini` for lower cost).
+- **Multi-provider vision extraction with automatic fallback** (`lib/openai.js`):
+  primary is **OpenAI GPT-4o** (vision + Structured Outputs, strict JSON schema),
+  with **Google Gemini** (`gemini-2.5-flash`) and **Groq** (Llama 4 Maverick,
+  vision-capable) as automatic fallbacks. If a provider errors — rate limit,
+  outage, malformed response — the next configured one is tried automatically, in
+  that order. Gemini/Groq don't get OpenAI's strict schema enforcement, so they're
+  given the same JSON shape spelled out in the prompt instead, and their output is
+  parsed defensively (markdown-fence stripped, shape-validated) before being
+  accepted. Only `OPENAI_API_KEY` is required; `GEMINI_API_KEY`/`GROQ_API_KEY` are
+  optional — leave either blank to skip that fallback. Models are all
+  configurable via `OPENAI_MODEL` / `GEMINI_MODEL` / `GROQ_MODEL`. The UI's
+  processing-progress stream surfaces it when a fallback kicked in (e.g. "OpenAI
+  unavailable — used Gemini instead").
 - **pdf-to-img / pdfjs-dist / @napi-rs/canvas** for PDF → image rendering
   (pure npm install, no Poppler/ImageMagick system dependency, so it deploys
   cleanly to Vercel's serverless functions).
@@ -59,11 +72,15 @@ Click-to-highlight viewer.
 
 ```bash
 npm install
-cp .env.example .env.local   # then fill in OPENAI_API_KEY
+cp .env.example .env.local   # then fill in OPENAI_API_KEY (and optionally GEMINI_API_KEY / GROQ_API_KEY)
 npm run dev
 ```
 
 Open http://localhost:3000.
+
+`node test/fallback-test.mjs` exercises the fallback control flow in isolation
+(provider order, key-skipping, error aggregation) without needing real API
+access.
 
 ## Assumptions & limitations
 
@@ -87,3 +104,7 @@ Open http://localhost:3000.
 - **Grading/AI feedback was intentionally left out of scope** for this submission
   (the brief marks it optional) to prioritize getting the core extraction →
   mapping → highlighting flow correct and well-tested first.
+- **Groq's vision-capable model accepts at most 5 images per request** at time of
+  writing. If it's ever reached as a fallback with a longer document, that call
+  will fail and error out (rather than silently truncating pages) — OpenAI and
+  Gemini don't have this limitation.
